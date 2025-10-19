@@ -11,6 +11,146 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool for batch TRMM device tests
+template <typename TA, typename TB>
+struct BatchTrmmDeviceMemoryPool {
+    using scalar_t = blas::scalar_type<TA, TB>;
+    using real_t = blas::real_type<scalar_t>;
+
+    // Host memory
+    TA* A = nullptr;
+    TB* B = nullptr;
+    TB* Bref = nullptr;
+
+    // Device memory
+    TA* dA = nullptr;
+    TB* dB = nullptr;
+
+    // Norm arrays
+    real_t* Anorm = nullptr;
+    real_t* Bnorm = nullptr;
+
+    // Memory sizes
+    size_t size_A = 0;
+    size_t size_B = 0;
+    size_t batch_size = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    void allocate(size_t sA, size_t sB, size_t batch, int64_t dev) {
+        // Free existing memory if sizes changed or different device
+        if (queue != nullptr &&
+            (size_A != sA || size_B != sB ||
+             batch_size != batch || device_id != dev)) {
+            free();
+        }
+
+        // Allocate if needed
+        if (A == nullptr || size_A != sA || batch_size != batch) {
+            size_A = sA;
+            size_B = sB;
+            batch_size = batch;
+            device_id = dev;
+
+            // Allocate host memory
+            A = new TA[batch * size_A];
+            B = new TB[batch * size_B];
+            Bref = new TB[batch * size_B];
+
+            // Allocate norm arrays
+            Anorm = new real_t[batch];
+            Bnorm = new real_t[batch];
+
+            // Create queue if needed
+            if (queue == nullptr) {
+                queue = new blas::Queue(device_id);
+            }
+
+            // Allocate device memory
+            dA = blas::device_malloc<TA>(batch * size_A, *queue);
+            dB = blas::device_malloc<TB>(batch * size_B, *queue);
+            queue->sync();
+        }
+    }
+
+    void free() {
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] Bref;
+            delete[] Anorm;
+            delete[] Bnorm;
+            A = nullptr;
+            B = nullptr;
+            Bref = nullptr;
+            Anorm = nullptr;
+            Bnorm = nullptr;
+        }
+
+        if (queue != nullptr && dA != nullptr) {
+            blas::device_free(dA, *queue);
+            blas::device_free(dB, *queue);
+            dA = nullptr;
+            dB = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_A = 0;
+        size_B = 0;
+        batch_size = 0;
+        device_id = -1;
+    }
+
+        ~BatchTrmmDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] Bref;
+            delete[] Anorm;
+            delete[] Bnorm;
+            A = nullptr;
+            B = nullptr;
+            Bref = nullptr;
+            Anorm = nullptr;
+            Bnorm = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static BatchTrmmDeviceMemoryPool<float, float> pool_float;
+static BatchTrmmDeviceMemoryPool<double, double> pool_double;
+static BatchTrmmDeviceMemoryPool<std::complex<float>, std::complex<float>> pool_complex_float;
+static BatchTrmmDeviceMemoryPool<std::complex<double>, std::complex<double>> pool_complex_double;
+
+// Helper function to get the appropriate pool
+template <typename TA, typename TB>
+BatchTrmmDeviceMemoryPool<TA, TB>& get_pool() {
+    if constexpr (std::is_same_v<TA, float>) {
+        return pool_float;
+    }
+    else if constexpr (std::is_same_v<TA, double>) {
+        return pool_double;
+    }
+    else if constexpr (std::is_same_v<TA, std::complex<float>>) {
+        return pool_complex_float;
+    }
+    else if constexpr (std::is_same_v<TA, std::complex<double>>) {
+        return pool_complex_double;
+    }
+}
+
+// -----------------------------------------------------------------------------
 template <typename TA, typename TB>
 void test_batch_trmm_work_device( Params& params, bool run )
 {
@@ -57,14 +197,18 @@ void test_batch_trmm_work_device( Params& params, bool run )
     int64_t ldb_ = max( roundup( Bm, align ), 1 );
     size_t size_A = size_t(lda_)*Am;
     size_t size_B = size_t(ldb_)*Bn;
-    TA* A    = new TA[ batch * size_A ];
-    TB* B    = new TB[ batch * size_B ];
-    TB* Bref = new TB[ batch * size_B ];
 
-    // device specifics
-    blas::Queue queue( device );
-    TA* dA = blas::device_malloc<TA>( batch * size_A, queue );
-    TB* dB = blas::device_malloc<TB>( batch * size_B, queue );
+    // Get memory pool and allocate
+    auto& pool = get_pool<TA, TB>();
+    pool.allocate(size_A, size_B, batch, device);
+
+    // Use pool memory
+    TA* A = pool.A;
+    TB* B = pool.B;
+    TB* Bref = pool.Bref;
+    TA* dA = pool.dA;
+    TB* dB = pool.dB;
+    blas::Queue& queue = *pool.queue;
 
     // pointer arrays
     std::vector<TA*>    Aarray( batch );
@@ -107,8 +251,8 @@ void test_batch_trmm_work_device( Params& params, bool run )
 
     // norms for error check
     real_t work[1];
-    real_t* Anorm = new real_t[ batch ];
-    real_t* Bnorm = new real_t[ batch ];
+    real_t* Anorm = pool.Anorm;
+    real_t* Bnorm = pool.Bnorm;
 
     for (size_t s = 0; s < batch; ++s) {
         Anorm[s] = lapack_lantr( "f", to_c_string( uplo_ ), to_c_string( diag_ ), Am, Am, Aarray[s], lda_, work );
@@ -165,14 +309,7 @@ void test_batch_trmm_work_device( Params& params, bool run )
         params.okay() = okay;
     }
 
-    delete[] A;
-    delete[] B;
-    delete[] Bref;
-    delete[] Anorm;
-    delete[] Bnorm;
-
-    blas::device_free( dA, queue );
-    blas::device_free( dB, queue );
+    // Memory is managed by the pool, no need to free here
 }
 
 // -----------------------------------------------------------------------------

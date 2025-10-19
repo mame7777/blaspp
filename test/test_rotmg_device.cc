@@ -9,6 +9,130 @@
 #include "print_matrix.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool for rotmg_device test
+template <typename T>
+struct RotmgDeviceMemoryPool {
+    // Host memory
+    T* d1 = nullptr;
+    T* d1_ref = nullptr;
+    T* d2 = nullptr;
+    T* d2_ref = nullptr;
+    T* x1 = nullptr;
+    T* x1_ref = nullptr;
+    T* y1 = nullptr;
+    T* y1_ref = nullptr;
+    T* ps = nullptr;
+    T* ps_ref = nullptr;
+
+    // Device memory
+    T* d_d1 = nullptr;
+    T* d_d2 = nullptr;
+    T* d_x1 = nullptr;
+    T* d_y1 = nullptr;
+    T* d_ps = nullptr;
+
+    // Memory sizes
+    size_t size_vec = 0;  // for d1, d2, x1, y1
+    size_t size_ps = 0;   // for ps (5*n)
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    void allocate(size_t n_vec, size_t n_ps, int64_t dev) {
+        // Check if we can reuse existing allocation
+        if (d1 != nullptr && size_vec >= n_vec && size_ps >= n_ps && device_id == dev) {
+            return;  // Reuse existing allocation
+        }
+
+        // Free old allocation if exists
+        free();
+
+        // Store new sizes
+        size_vec = n_vec;
+        size_ps = n_ps;
+        device_id = dev;
+
+        // Create queue if needed
+        if (queue == nullptr) {
+            queue = new blas::Queue(device_id);
+        }
+
+        // Allocate host memory
+        d1 = new T[size_vec];
+        d1_ref = new T[size_vec];
+        d2 = new T[size_vec];
+        d2_ref = new T[size_vec];
+        x1 = new T[size_vec];
+        x1_ref = new T[size_vec];
+        y1 = new T[size_vec];
+        y1_ref = new T[size_vec];
+        ps = new T[size_ps];
+        ps_ref = new T[size_ps];
+
+        // Allocate device memory
+        d_d1 = blas::device_malloc<T>(size_vec, *queue);
+        d_d2 = blas::device_malloc<T>(size_vec, *queue);
+        d_x1 = blas::device_malloc<T>(size_vec, *queue);
+        d_y1 = blas::device_malloc<T>(size_vec, *queue);
+        d_ps = blas::device_malloc<T>(size_ps, *queue);
+    }
+
+    void free() {
+        // Free host memory
+        delete[] d1; d1 = nullptr;
+        delete[] d1_ref; d1_ref = nullptr;
+        delete[] d2; d2 = nullptr;
+        delete[] d2_ref; d2_ref = nullptr;
+        delete[] x1; x1 = nullptr;
+        delete[] x1_ref; x1_ref = nullptr;
+        delete[] y1; y1 = nullptr;
+        delete[] y1_ref; y1_ref = nullptr;
+        delete[] ps; ps = nullptr;
+        delete[] ps_ref; ps_ref = nullptr;
+
+        // Free device memory
+        if (queue != nullptr) {
+            if (d_d1 != nullptr) blas::device_free(d_d1, *queue);
+            if (d_d2 != nullptr) blas::device_free(d_d2, *queue);
+            if (d_x1 != nullptr) blas::device_free(d_x1, *queue);
+            if (d_y1 != nullptr) blas::device_free(d_y1, *queue);
+            if (d_ps != nullptr) blas::device_free(d_ps, *queue);
+
+            d_d1 = nullptr;
+            d_d2 = nullptr;
+            d_x1 = nullptr;
+            d_y1 = nullptr;
+            d_ps = nullptr;
+        }
+
+        size_vec = 0;
+        size_ps = 0;
+    }
+
+    ~RotmgDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        delete[] d1; d1 = nullptr;
+        delete[] d1_ref; d1_ref = nullptr;
+        delete[] d2; d2 = nullptr;
+        delete[] d2_ref; d2_ref = nullptr;
+        delete[] x1; x1 = nullptr;
+        delete[] x1_ref; x1_ref = nullptr;
+        delete[] y1; y1 = nullptr;
+        delete[] y1_ref; y1_ref = nullptr;
+        delete[] ps; ps = nullptr;
+        delete[] ps_ref; ps_ref = nullptr;
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools (only float and double, rotmg doesn't support complex)
+static RotmgDeviceMemoryPool<float> pool_s;
+static RotmgDeviceMemoryPool<double> pool_d;
+
+// -----------------------------------------------------------------------------
 template <typename T>
 void test_rotmg_device_work( Params& params, bool run )
 {
@@ -42,17 +166,34 @@ void test_rotmg_device_work( Params& params, bool run )
         return;
     }
 
-    // setup
-    T* d1 = new T[ n ];
-    T* d1_ref = new T[ n ];
-    T* d2 = new T[ n ];
-    T* d2_ref = new T[ n ];
-    T* x1 = new T[ n ];
-    T* x1_ref = new T[ n ];
-    T* y1 = new T[ n ];
-    T* y1_ref = new T[ n ];
-    T* ps = new T[ 5*n ];
-    T* ps_ref = new T[ 5*n ];
+    // Get the appropriate memory pool
+    RotmgDeviceMemoryPool<T>& pool =
+        std::is_same<T, float>::value ?
+            reinterpret_cast<RotmgDeviceMemoryPool<T>&>(pool_s) :
+            reinterpret_cast<RotmgDeviceMemoryPool<T>&>(pool_d);
+
+    // Allocate from pool
+    pool.allocate(n, 5*n, device);
+
+    // Get pointers from pool
+    T* d1 = pool.d1;
+    T* d1_ref = pool.d1_ref;
+    T* d2 = pool.d2;
+    T* d2_ref = pool.d2_ref;
+    T* x1 = pool.x1;
+    T* x1_ref = pool.x1_ref;
+    T* y1 = pool.y1;
+    T* y1_ref = pool.y1_ref;
+    T* ps = pool.ps;
+    T* ps_ref = pool.ps_ref;
+
+    T* d_d1 = pool.d_d1;
+    T* d_d2 = pool.d_d2;
+    T* d_x1 = pool.d_x1;
+    T* d_y1 = pool.d_y1;
+    T* d_ps = pool.d_ps;
+
+    blas::Queue& queue = *pool.queue;
 
     int64_t idist = 3;
     int iseed[4] = { 0, 0, 0, 1 };
@@ -61,20 +202,6 @@ void test_rotmg_device_work( Params& params, bool run )
     lapack_larnv( idist, iseed, n, x1 );
     lapack_larnv( idist, iseed, n, y1 );
     lapack_larnv( idist, iseed, 5*n, ps );
-
-    // device specifics
-    blas::Queue queue( device );
-    T* d_d1;
-    T* d_d2;
-    T* d_x1;
-    T* d_y1;
-    T* d_ps;
-
-    d_d1 = blas::device_malloc<T>( n, queue );
-    d_d2 = blas::device_malloc<T>( n, queue );
-    d_x1 = blas::device_malloc<T>( n, queue );
-    d_y1 = blas::device_malloc<T>( n, queue );
-    d_ps = blas::device_malloc<T>( 5*n, queue );
 
     device_memcpy( d_d1, d1, n, queue );
     device_memcpy( d_d2, d2, n, queue );
@@ -143,22 +270,7 @@ void test_rotmg_device_work( Params& params, bool run )
         params.okay() = (error < tol);
     }
 
-    delete[] d1;
-    delete[] d1_ref;
-    delete[] d2;
-    delete[] d2_ref;
-    delete[] x1;
-    delete[] x1_ref;
-    delete[] y1;
-    delete[] y1_ref;
-    delete[] ps;
-    delete[] ps_ref;
-
-    blas::device_free( d_d1, queue );
-    blas::device_free( d_d2, queue );
-    blas::device_free( d_x1, queue );
-    blas::device_free( d_y1, queue );
-    blas::device_free( d_ps, queue );
+    // Memory is retained in pool for reuse
 }
 
 // -----------------------------------------------------------------------------

@@ -10,6 +10,116 @@
 #include "print_matrix.hh"
 #include "blas/device.hh"
 
+// -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename scalar_t>
+struct ConjDeviceMemoryPool {
+    // Host memory
+    scalar_t* x = nullptr;
+    scalar_t* y = nullptr;
+    scalar_t* yref = nullptr;
+
+    // Device memory
+    scalar_t* dx = nullptr;
+    scalar_t* dy = nullptr;
+
+    // Memory sizes
+    size_t size_x = 0;
+    size_t size_y = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sx, size_t sy, int64_t dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (x == nullptr || size_x < sx || size_y < sy) {
+            if (x != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || x == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_x = (sx > size_x) ? sx : size_x;
+            size_y = (sy > size_y) ? sy : size_y;
+            device_id = dev;
+
+            x = new scalar_t[size_x];
+            y = new scalar_t[size_y];
+            yref = new scalar_t[size_y];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dx = blas::device_malloc<scalar_t>(size_x, *queue);
+            dy = blas::device_malloc<scalar_t>(size_y, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (x != nullptr) {
+            delete[] x;
+            delete[] y;
+            delete[] yref;
+            x = nullptr;
+            y = nullptr;
+            yref = nullptr;
+        }
+
+        if (dx != nullptr && queue != nullptr) {
+            blas::device_free(dx, *queue);
+            blas::device_free(dy, *queue);
+            dx = nullptr;
+            dy = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_x = 0;
+        size_y = 0;
+        device_id = -1;
+    }
+
+    ~ConjDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (x != nullptr) {
+            delete[] x;
+            delete[] y;
+            delete[] yref;
+            x = nullptr;
+            y = nullptr;
+            yref = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static ConjDeviceMemoryPool<float> pool_s;
+static ConjDeviceMemoryPool<double> pool_d;
+static ConjDeviceMemoryPool<std::complex<float>> pool_c;
+static ConjDeviceMemoryPool<std::complex<double>> pool_z;
+
 //------------------------------------------------------------------------------
 template <typename scalar_t>
 void cpu_conj(
@@ -51,20 +161,34 @@ void test_conj_device_work( Params& params, bool run )
         return;
     }
 
+    // Get appropriate memory pool
+    ConjDeviceMemoryPool<scalar_t>* pool = nullptr;
+    if (std::is_same<scalar_t, float>::value) {
+        pool = reinterpret_cast<ConjDeviceMemoryPool<scalar_t>*>(&pool_s);
+    } else if (std::is_same<scalar_t, double>::value) {
+        pool = reinterpret_cast<ConjDeviceMemoryPool<scalar_t>*>(&pool_d);
+    } else if (std::is_same<scalar_t, std::complex<float>>::value) {
+        pool = reinterpret_cast<ConjDeviceMemoryPool<scalar_t>*>(&pool_c);
+    } else if (std::is_same<scalar_t, std::complex<double>>::value) {
+        pool = reinterpret_cast<ConjDeviceMemoryPool<scalar_t>*>(&pool_z);
+    }
+
     // setup
     size_t size_x = max( (n - 1) * abs( incx ) + 1, 0 );
     size_t size_y = max( (n - 1) * abs( incy ) + 1, 0 );
-    scalar_t* x    = new scalar_t[ size_x ];
-    scalar_t* y    = new scalar_t[ size_y ];
-    scalar_t* yref = new scalar_t[ size_y ];
+
+    // Allocate or reuse memory from pool
+    pool->allocate(size_x, size_y, device);
+
+    scalar_t* x = pool->x;
+    scalar_t* y = pool->y;
+    scalar_t* yref = pool->yref;
 
     // device specifics
-    blas::Queue queue( device );
-    scalar_t* dx;
-    scalar_t* dy;
+    blas::Queue& queue = *(pool->queue);
+    scalar_t* dx = pool->dx;
+    scalar_t* dy = pool->dy;
 
-    dx = blas::device_malloc<scalar_t>( size_x, queue );
-    dy = blas::device_malloc<scalar_t>( size_y, queue );
     queue.sync();
 
     int64_t idist = 1;
@@ -122,12 +246,8 @@ void test_conj_device_work( Params& params, bool run )
         params.okay() = (error == 0);
     }
 
-    delete[] x;
-    delete[] y;
-    delete[] yref;
-
-    blas::device_free( dx, queue );
-    blas::device_free( dy, queue );
+    // Memory is managed by the pool and will be reused or freed automatically
+    // No explicit deletion needed here
 }
 
 //------------------------------------------------------------------------------

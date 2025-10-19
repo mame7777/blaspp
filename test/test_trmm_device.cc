@@ -11,6 +11,116 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename TA, typename TB>
+struct TrmmDeviceMemoryPool {
+    // Host memory
+    TA* A = nullptr;
+    TB* B = nullptr;
+    TB* Bref = nullptr;
+
+    // Device memory
+    TA* dA = nullptr;
+    TB* dB = nullptr;
+
+    // Memory sizes
+    size_t size_A = 0;
+    size_t size_B = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sA, size_t sB, int64_t dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (A == nullptr || size_A < sA || size_B < sB) {
+            if (A != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || A == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_A = (sA > size_A) ? sA : size_A;
+            size_B = (sB > size_B) ? sB : size_B;
+            device_id = dev;
+
+            A = new TA[size_A];
+            B = new TB[size_B];
+            Bref = new TB[size_B];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dA = blas::device_malloc<TA>(size_A, *queue);
+            dB = blas::device_malloc<TB>(size_B, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] Bref;
+            A = nullptr;
+            B = nullptr;
+            Bref = nullptr;
+        }
+
+        if (dA != nullptr && queue != nullptr) {
+            blas::device_free(dA, *queue);
+            blas::device_free(dB, *queue);
+            dA = nullptr;
+            dB = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_A = 0;
+        size_B = 0;
+        device_id = -1;
+    }
+
+        ~TrmmDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] Bref;
+            A = nullptr;
+            B = nullptr;
+            Bref = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static TrmmDeviceMemoryPool<float, float> pool_s;
+static TrmmDeviceMemoryPool<double, double> pool_d;
+static TrmmDeviceMemoryPool<std::complex<float>, std::complex<float>> pool_c;
+static TrmmDeviceMemoryPool<std::complex<double>, std::complex<double>> pool_z;
+
+// -----------------------------------------------------------------------------
 template <typename TA, typename TB>
 void test_trmm_device_work( Params& params, bool run )
 {
@@ -56,17 +166,32 @@ void test_trmm_device_work( Params& params, bool run )
     int64_t ldb = max( roundup( Bm, align ), 1 );
     size_t size_A = size_t(lda)*Am;
     size_t size_B = size_t(ldb)*Bn;
-    TA* A    = new TA[ size_A ];
-    TB* B    = new TB[ size_B ];
-    TB* Bref = new TB[ size_B ];
 
-    // device specifics
-    blas::Queue queue( device );
-    TA* dA;
-    TB* dB;
+    // Get appropriate memory pool based on scalar type
+    TrmmDeviceMemoryPool<TA, TB>* pool;
+    if (std::is_same<TA, float>::value) {
+        pool = reinterpret_cast<TrmmDeviceMemoryPool<TA, TB>*>(&pool_s);
+    }
+    else if (std::is_same<TA, double>::value) {
+        pool = reinterpret_cast<TrmmDeviceMemoryPool<TA, TB>*>(&pool_d);
+    }
+    else if (std::is_same<TA, std::complex<float>>::value) {
+        pool = reinterpret_cast<TrmmDeviceMemoryPool<TA, TB>*>(&pool_c);
+    }
+    else {
+        pool = reinterpret_cast<TrmmDeviceMemoryPool<TA, TB>*>(&pool_z);
+    }
 
-    dA = blas::device_malloc<TA>( size_A, queue );
-    dB = blas::device_malloc<TB>( size_B, queue );
+    // Allocate memory from pool
+    pool->allocate(size_A, size_B, device);
+
+    // Use pointers from pool
+    TA* A = pool->A;
+    TB* B = pool->B;
+    TB* Bref = pool->Bref;
+    TA* dA = pool->dA;
+    TB* dB = pool->dB;
+    blas::Queue& queue = *(pool->queue);
 
     int64_t idist = 1;
     int iseed[4] = { 0, 0, 0, 1 };
@@ -157,13 +282,6 @@ void test_trmm_device_work( Params& params, bool run )
         params.error() = error;
         params.okay() = okay;
     }
-
-    delete[] A;
-    delete[] B;
-    delete[] Bref;
-
-    blas::device_free( dA, queue );
-    blas::device_free( dB, queue );
 }
 
 // -----------------------------------------------------------------------------

@@ -11,6 +11,122 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename TX, typename TY>
+struct DotDeviceMemoryPool {
+    // Host memory
+    TX* x = nullptr;
+    TY* y = nullptr;
+
+    // Device memory
+    TX* dx = nullptr;
+    TY* dy = nullptr;
+    blas::scalar_type<TX, TY>* result_dev = nullptr;
+
+    // Memory sizes
+    size_t size_x = 0;
+    size_t size_y = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sx, size_t sy, int64_t dev, bool need_result_dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (x == nullptr || size_x < sx || size_y < sy) {
+            if (x != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || x == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_x = (sx > size_x) ? sx : size_x;
+            size_y = (sy > size_y) ? sy : size_y;
+            device_id = dev;
+
+            x = new TX[size_x];
+            y = new TY[size_y];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dx = blas::device_malloc<TX>(size_x, *queue);
+            dy = blas::device_malloc<TY>(size_y, *queue);
+            if (need_result_dev) {
+                result_dev = blas::device_malloc<blas::scalar_type<TX, TY>>(1, *queue);
+            }
+        }
+        else if (need_result_dev && result_dev == nullptr) {
+            result_dev = blas::device_malloc<blas::scalar_type<TX, TY>>(1, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (x != nullptr) {
+            delete[] x;
+            delete[] y;
+            x = nullptr;
+            y = nullptr;
+        }
+
+        if (dx != nullptr && queue != nullptr) {
+            blas::device_free(dx, *queue);
+            blas::device_free(dy, *queue);
+            dx = nullptr;
+            dy = nullptr;
+        }
+
+        if (result_dev != nullptr && queue != nullptr) {
+            blas::device_free(result_dev, *queue);
+            result_dev = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_x = 0;
+        size_y = 0;
+        device_id = -1;
+    }
+
+    ~DotDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (x != nullptr) {
+            delete[] x;
+            delete[] y;
+            x = nullptr;
+            y = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static DotDeviceMemoryPool<float, float> pool_s;
+static DotDeviceMemoryPool<double, double> pool_d;
+static DotDeviceMemoryPool<std::complex<float>, std::complex<float>> pool_c;
+static DotDeviceMemoryPool<std::complex<double>, std::complex<double>> pool_z;
+
+// -----------------------------------------------------------------------------
 template <typename TX, typename TY>
 void test_dot_device_work( Params& params, bool run )
 {
@@ -52,11 +168,27 @@ void test_dot_device_work( Params& params, bool run )
         return;
     }
 
+    // Get appropriate memory pool
+    DotDeviceMemoryPool<TX, TY>* pool = nullptr;
+    if (std::is_same<TX, float>::value && std::is_same<TY, float>::value) {
+        pool = reinterpret_cast<DotDeviceMemoryPool<TX, TY>*>(&pool_s);
+    } else if (std::is_same<TX, double>::value && std::is_same<TY, double>::value) {
+        pool = reinterpret_cast<DotDeviceMemoryPool<TX, TY>*>(&pool_d);
+    } else if (std::is_same<TX, std::complex<float>>::value && std::is_same<TY, std::complex<float>>::value) {
+        pool = reinterpret_cast<DotDeviceMemoryPool<TX, TY>*>(&pool_c);
+    } else if (std::is_same<TX, std::complex<double>>::value && std::is_same<TY, std::complex<double>>::value) {
+        pool = reinterpret_cast<DotDeviceMemoryPool<TX, TY>*>(&pool_z);
+    }
+
     // setup
     size_t size_x = max( (n - 1) * abs( incx ) + 1, 0 );
     size_t size_y = max( (n - 1) * abs( incy ) + 1, 0 );
-    TX* x = new TX[ size_x ];
-    TY* y = new TY[ size_y ];
+
+    // Allocate or reuse memory from pool
+    pool->allocate(size_x, size_y, device, mode == 'd');
+
+    TX* x = pool->x;
+    TY* y = pool->y;
 
     int64_t idist = 1;
     int iseed[4] = { 0, 0, 0, 1 };
@@ -68,19 +200,16 @@ void test_dot_device_work( Params& params, bool run )
     real_t Ynorm = cblas_nrm2( n, y, abs( incy ) );
 
     // device specifics
-    blas::Queue queue( device );
-    TX* dx;
-    TY* dy;
-
-    dx = blas::device_malloc<TX>( size_x, queue );
-    dy = blas::device_malloc<TY>( size_y, queue );
+    blas::Queue& queue = *(pool->queue);
+    TX* dx = pool->dx;
+    TY* dy = pool->dy;
 
     blas::device_copy_vector( n, x, abs( incx ), dx, abs( incx ), queue );
     blas::device_copy_vector( n, y, abs( incy ), dy, abs( incy ), queue );
     queue.sync();
 
     if (mode == 'd') {
-        result_ptr = blas::device_malloc<scalar_t>( 1, queue );
+        result_ptr = pool->result_dev;
         #if defined( BLAS_HAVE_CUBLAS )
             cublasSetPointerMode( queue.handle(), CUBLAS_POINTER_MODE_DEVICE );
         #elif defined( BLAS_HAVE_ROCBLAS )
@@ -170,13 +299,8 @@ void test_dot_device_work( Params& params, bool run )
         params.okay() = okay;
     }
 
-    delete[] x;
-    delete[] y;
-
-    blas::device_free( dx, queue );
-    blas::device_free( dy, queue );
-    if (mode == 'd')
-        blas::device_free( result_ptr, queue );
+    // Memory is managed by the pool and will be reused or freed automatically
+    // No explicit deletion needed here
 }
 
 // -----------------------------------------------------------------------------

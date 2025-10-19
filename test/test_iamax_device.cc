@@ -10,6 +10,109 @@
 #include "print_matrix.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename Tx>
+struct IamaxDeviceMemoryPool {
+    // Host memory
+    Tx* x = nullptr;
+
+    // Device memory
+    Tx* dx = nullptr;
+    int64_t* result_dev = nullptr;
+
+    // Memory sizes
+    size_t size_x = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sx, int64_t dev, bool need_result_dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (x == nullptr || size_x < sx) {
+            if (x != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || x == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_x = (sx > size_x) ? sx : size_x;
+            device_id = dev;
+
+            x = new Tx[size_x];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dx = blas::device_malloc<Tx>(size_x, *queue);
+            if (need_result_dev) {
+                result_dev = blas::device_malloc<int64_t>(1, *queue);
+            }
+        }
+        else if (need_result_dev && result_dev == nullptr) {
+            result_dev = blas::device_malloc<int64_t>(1, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (x != nullptr) {
+            delete[] x;
+            x = nullptr;
+        }
+
+        if (dx != nullptr && queue != nullptr) {
+            blas::device_free(dx, *queue);
+            dx = nullptr;
+        }
+
+        if (result_dev != nullptr && queue != nullptr) {
+            blas::device_free(result_dev, *queue);
+            result_dev = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_x = 0;
+        device_id = -1;
+    }
+
+    ~IamaxDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (x != nullptr) {
+            delete[] x;
+            x = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static IamaxDeviceMemoryPool<float> pool_s;
+static IamaxDeviceMemoryPool<double> pool_d;
+static IamaxDeviceMemoryPool<std::complex<float>> pool_c;
+static IamaxDeviceMemoryPool<std::complex<double>> pool_z;
+
+// -----------------------------------------------------------------------------
 template <typename T>
 void test_iamax_device_work( Params& params, bool run )
 {
@@ -50,25 +153,39 @@ void test_iamax_device_work( Params& params, bool run )
         return;
     }
 
+    // Get appropriate memory pool
+    IamaxDeviceMemoryPool<T>* pool = nullptr;
+    if (std::is_same<T, float>::value) {
+        pool = reinterpret_cast<IamaxDeviceMemoryPool<T>*>(&pool_s);
+    } else if (std::is_same<T, double>::value) {
+        pool = reinterpret_cast<IamaxDeviceMemoryPool<T>*>(&pool_d);
+    } else if (std::is_same<T, std::complex<float>>::value) {
+        pool = reinterpret_cast<IamaxDeviceMemoryPool<T>*>(&pool_c);
+    } else if (std::is_same<T, std::complex<double>>::value) {
+        pool = reinterpret_cast<IamaxDeviceMemoryPool<T>*>(&pool_z);
+    }
+
     // setup
     size_t size_x = max( (n - 1) * abs( incx ) + 1, 0 );
-    T* x = new T[ size_x ];
 
+    // Allocate or reuse memory from pool
+    pool->allocate(size_x, device, mode == 'd');
+
+    T* x = pool->x;
+
+    // device specifics
+    blas::Queue& queue = *(pool->queue);
+    T* dx = pool->dx;
 
     int64_t idist = 1;
     int iseed[ 4 ] = { 0, 0, 0, 1 };
     lapack_larnv( idist, iseed, size_x, x );
 
-    // device specifics
-    blas::Queue queue( device );
-    T* dx;
-
-    dx = blas::device_malloc<T>( size_x, queue );
     blas::device_copy_vector( n, x, std::abs(incx), dx, std::abs(incx), queue );
     queue.sync();
 
     if (mode == 'd') {
-        result_ptr = blas::device_malloc< int64_t >( 1, queue );
+        result_ptr = pool->result_dev;
         #if defined( BLAS_HAVE_CUBLAS )
         cublasSetPointerMode( queue.handle(), CUBLAS_POINTER_MODE_DEVICE );
         #elif defined( BLAS_HAVE_ROCBLAS )
@@ -138,11 +255,8 @@ void test_iamax_device_work( Params& params, bool run )
         params.okay() = (error == 0);
     }
 
-    delete[] x;
-
-    blas::device_free( dx, queue );
-    if (mode == 'd')
-        blas::device_free( result_ptr, queue );
+    // Memory is managed by the pool and will be reused or freed automatically
+    // No explicit deletion needed here
 }
 
 // -----------------------------------------------------------------------------

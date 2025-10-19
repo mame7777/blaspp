@@ -11,6 +11,148 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for batch device memory management
+template <typename TA, typename TC>
+struct BatchHerkDeviceMemoryPool {
+    using scalar_t = blas::scalar_type<TA, TC>;
+    using real_t = blas::real_type<scalar_t>;
+
+    // Host memory
+    TA* A = nullptr;
+    TC* C = nullptr;
+    TC* Cref = nullptr;
+
+    // Device memory
+    TA* dA = nullptr;
+    TC* dC = nullptr;
+
+    // Norm arrays
+    real_t* Anorm = nullptr;
+    real_t* Cnorm = nullptr;
+
+    // Memory sizes
+    size_t size_A = 0;
+    size_t size_C = 0;
+    size_t batch_size = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes and batch count
+    void allocate(size_t sA, size_t sC, size_t batch, int64_t dev) {
+        // Free existing memory if sizes changed or different device
+        if (queue != nullptr &&
+            (size_A != sA || size_C != sC ||
+             batch_size != batch || device_id != dev)) {
+            free();
+        }
+
+        // Allocate if needed
+        if (A == nullptr || size_A != sA || batch_size != batch) {
+            size_A = sA;
+            size_C = sC;
+            batch_size = batch;
+            device_id = dev;
+
+            // Allocate host memory
+            A = new TA[batch * size_A];
+            C = new TC[batch * size_C];
+            Cref = new TC[batch * size_C];
+
+            // Allocate norm arrays
+            Anorm = new real_t[batch];
+            Cnorm = new real_t[batch];
+
+            // Create queue if needed
+            if (queue == nullptr) {
+                queue = new blas::Queue(device_id);
+            }
+
+            // Allocate device memory
+            dA = blas::device_malloc<TA>(batch * size_A, *queue);
+            dC = blas::device_malloc<TC>(batch * size_C, *queue);
+            queue->sync();
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (A != nullptr) {
+            delete[] A;
+            delete[] C;
+            delete[] Cref;
+            delete[] Anorm;
+            delete[] Cnorm;
+            A = nullptr;
+            C = nullptr;
+            Cref = nullptr;
+            Anorm = nullptr;
+            Cnorm = nullptr;
+        }
+
+        if (queue != nullptr && dA != nullptr) {
+            blas::device_free(dA, *queue);
+            blas::device_free(dC, *queue);
+            dA = nullptr;
+            dC = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_A = 0;
+        size_C = 0;
+        batch_size = 0;
+        device_id = -1;
+    }
+
+        ~BatchHerkDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (A != nullptr) {
+            delete[] A;
+            delete[] C;
+            delete[] Cref;
+            delete[] Anorm;
+            delete[] Cnorm;
+            A = nullptr;
+            C = nullptr;
+            Cref = nullptr;
+            Anorm = nullptr;
+            Cnorm = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static BatchHerkDeviceMemoryPool<float, float> pool_float;
+static BatchHerkDeviceMemoryPool<double, double> pool_double;
+static BatchHerkDeviceMemoryPool<std::complex<float>, std::complex<float>> pool_complex_float;
+static BatchHerkDeviceMemoryPool<std::complex<double>, std::complex<double>> pool_complex_double;
+
+// Helper function to get the appropriate pool
+template <typename TA, typename TC>
+BatchHerkDeviceMemoryPool<TA, TC>& get_pool() {
+    if constexpr (std::is_same_v<TA, float>) {
+        return reinterpret_cast<BatchHerkDeviceMemoryPool<TA, TC>&>(pool_float);
+    }
+    else if constexpr (std::is_same_v<TA, double>) {
+        return reinterpret_cast<BatchHerkDeviceMemoryPool<TA, TC>&>(pool_double);
+    }
+    else if constexpr (std::is_same_v<TA, std::complex<float>>) {
+        return reinterpret_cast<BatchHerkDeviceMemoryPool<TA, TC>&>(pool_complex_float);
+    }
+    else if constexpr (std::is_same_v<TA, std::complex<double>>) {
+        return reinterpret_cast<BatchHerkDeviceMemoryPool<TA, TC>&>(pool_complex_double);
+    }
+}
+
+// -----------------------------------------------------------------------------
 template <typename TA, typename TC>
 void test_batch_herk_device_work( Params& params, bool run )
 {
@@ -54,14 +196,18 @@ void test_batch_herk_device_work( Params& params, bool run )
     int64_t ldc_ = max( roundup( n_, align ), 1 );
     size_t size_A = size_t(lda_)*An;
     size_t size_C = size_t(ldc_)*n_;
-    TA* A    = new TA[ batch * size_A ];
-    TC* C    = new TC[ batch * size_C ];
-    TC* Cref = new TC[ batch * size_C ];
 
-    // device specifics
-    blas::Queue queue( device );
-    TA* dA = blas::device_malloc<TA>( batch * size_A, queue );
-    TC* dC = blas::device_malloc<TC>( batch * size_C, queue );
+    // Get memory pool and allocate
+    auto& pool = get_pool<TA, TC>();
+    pool.allocate(size_A, size_C, batch, device);
+
+    // Use pool memory
+    TA* A = pool.A;
+    TC* C = pool.C;
+    TC* Cref = pool.Cref;
+    TA* dA = pool.dA;
+    TC* dC = pool.dC;
+    blas::Queue& queue = *pool.queue;
 
     // pointer arrays
     std::vector<TA*>    Aarray( batch );
@@ -103,8 +249,8 @@ void test_batch_herk_device_work( Params& params, bool run )
 
     // norms for error check
     real_t work[1];
-    real_t* Anorm = new real_t[ batch ];
-    real_t* Cnorm = new real_t[ batch ];
+    real_t* Anorm = pool.Anorm;
+    real_t* Cnorm = pool.Cnorm;
 
     for (size_t s = 0; s < batch; ++s) {
         Anorm[s] = lapack_lange( "f", Am, An, Aarray[s], lda_, work );
@@ -157,14 +303,7 @@ void test_batch_herk_device_work( Params& params, bool run )
         params.okay() = okay;
     }
 
-    delete[] A;
-    delete[] C;
-    delete[] Cref;
-    delete[] Anorm;
-    delete[] Cnorm;
-
-    blas::device_free( dA, queue );
-    blas::device_free( dC, queue );
+    // Memory is managed by the pool, no need to free here
 }
 
 // -----------------------------------------------------------------------------

@@ -11,6 +11,129 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename TA, typename TB, typename TC>
+struct Syr2kDeviceMemoryPool {
+    // Host memory
+    TA* A = nullptr;
+    TB* B = nullptr;
+    TC* C = nullptr;
+    TC* Cref = nullptr;
+
+    // Device memory
+    TA* dA = nullptr;
+    TB* dB = nullptr;
+    TC* dC = nullptr;
+
+    // Memory sizes
+    size_t size_A = 0;
+    size_t size_B = 0;
+    size_t size_C = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sA, size_t sB, size_t sC, int64_t dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (A == nullptr || size_A < sA || size_B < sB || size_C < sC) {
+            if (A != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || A == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_A = (sA > size_A) ? sA : size_A;
+            size_B = (sB > size_B) ? sB : size_B;
+            size_C = (sC > size_C) ? sC : size_C;
+            device_id = dev;
+
+            A = new TA[size_A];
+            B = new TB[size_B];
+            C = new TC[size_C];
+            Cref = new TC[size_C];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dA = blas::device_malloc<TA>(size_A, *queue);
+            dB = blas::device_malloc<TB>(size_B, *queue);
+            dC = blas::device_malloc<TC>(size_C, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] C;
+            delete[] Cref;
+            A = nullptr;
+            B = nullptr;
+            C = nullptr;
+            Cref = nullptr;
+        }
+
+        if (dA != nullptr && queue != nullptr) {
+            blas::device_free(dA, *queue);
+            blas::device_free(dB, *queue);
+            blas::device_free(dC, *queue);
+            dA = nullptr;
+            dB = nullptr;
+            dC = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_A = 0;
+        size_B = 0;
+        size_C = 0;
+        device_id = -1;
+    }
+
+        ~Syr2kDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (A != nullptr) {
+            delete[] A;
+            delete[] B;
+            delete[] C;
+            delete[] Cref;
+            A = nullptr;
+            B = nullptr;
+            C = nullptr;
+            Cref = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static Syr2kDeviceMemoryPool<float, float, float> pool_s;
+static Syr2kDeviceMemoryPool<double, double, double> pool_d;
+static Syr2kDeviceMemoryPool<std::complex<float>, std::complex<float>, std::complex<float>> pool_c;
+static Syr2kDeviceMemoryPool<std::complex<double>, std::complex<double>, std::complex<double>> pool_z;
+
+// -----------------------------------------------------------------------------
 template <typename TA, typename TB, typename TC>
 void test_syr2k_device_work( Params& params, bool run )
 {
@@ -57,20 +180,34 @@ void test_syr2k_device_work( Params& params, bool run )
     size_t size_A = size_t(lda)*An;
     size_t size_B = size_t(ldb)*An;
     size_t size_C = size_t(ldc)*n;
-    TA* A    = new TA[ size_A ];
-    TB* B    = new TB[ size_B ];
-    TC* C    = new TC[ size_C ];
-    TC* Cref = new TC[ size_C ];
 
-    // device specifics
-    blas::Queue queue( device );
-    TA* dA;
-    TB* dB;
-    TC* dC;
+    // Get appropriate memory pool based on scalar type
+    Syr2kDeviceMemoryPool<TA, TB, TC>* pool;
+    if (std::is_same<TA, float>::value) {
+        pool = reinterpret_cast<Syr2kDeviceMemoryPool<TA, TB, TC>*>(&pool_s);
+    }
+    else if (std::is_same<TA, double>::value) {
+        pool = reinterpret_cast<Syr2kDeviceMemoryPool<TA, TB, TC>*>(&pool_d);
+    }
+    else if (std::is_same<TA, std::complex<float>>::value) {
+        pool = reinterpret_cast<Syr2kDeviceMemoryPool<TA, TB, TC>*>(&pool_c);
+    }
+    else {
+        pool = reinterpret_cast<Syr2kDeviceMemoryPool<TA, TB, TC>*>(&pool_z);
+    }
 
-    dA = blas::device_malloc<TA>( size_A, queue );
-    dB = blas::device_malloc<TB>( size_B, queue );
-    dC = blas::device_malloc<TC>( size_C, queue );
+    // Allocate memory from pool
+    pool->allocate(size_A, size_B, size_C, device);
+
+    // Use pointers from pool
+    TA* A = pool->A;
+    TB* B = pool->B;
+    TC* C = pool->C;
+    TC* Cref = pool->Cref;
+    TA* dA = pool->dA;
+    TB* dB = pool->dB;
+    TC* dC = pool->dC;
+    blas::Queue& queue = *(pool->queue);
 
     int64_t idist = 1;
     int iseed[4] = { 0, 0, 0, 1 };
@@ -183,15 +320,6 @@ void test_syr2k_device_work( Params& params, bool run )
         params.error() = error;
         params.okay() = okay;
     }
-
-    delete[] A;
-    delete[] B;
-    delete[] C;
-    delete[] Cref;
-
-    blas::device_free( dA, queue );
-    blas::device_free( dB, queue );
-    blas::device_free( dC, queue );
 }
 
 // -----------------------------------------------------------------------------

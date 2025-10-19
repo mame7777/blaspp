@@ -11,6 +11,124 @@
 #include "check_gemm.hh"
 
 // -----------------------------------------------------------------------------
+// Memory pool structure for device memory management
+template <typename TX>
+struct RotmDeviceMemoryPool {
+    // Host memory
+    TX* x = nullptr;
+    TX* xref = nullptr;
+    TX* y = nullptr;
+    TX* yref = nullptr;
+
+    // Device memory
+    TX* dx = nullptr;
+    TX* dy = nullptr;
+    TX* dp = nullptr;
+
+    // Memory sizes
+    size_t size_x = 0;
+    size_t size_y = 0;
+
+    // Queue
+    blas::Queue* queue = nullptr;
+    int64_t device_id = -1;
+
+    // Allocate memory for given sizes
+    void allocate(size_t sx, size_t sy, int64_t dev) {
+        bool need_realloc = false;
+
+        // Check if device changed
+        if (device_id != dev && queue != nullptr) {
+            free();
+            need_realloc = true;
+        }
+
+        // Check if we need to allocate larger memory
+        if (x == nullptr || size_x < sx || size_y < sy) {
+            if (x != nullptr) {
+                free();
+            }
+            need_realloc = true;
+        }
+
+        // Allocate new memory if needed
+        if (need_realloc || x == nullptr) {
+            // Use larger size to avoid frequent reallocation
+            size_x = (sx > size_x) ? sx : size_x;
+            size_y = (sy > size_y) ? sy : size_y;
+            device_id = dev;
+
+            x = new TX[size_x];
+            xref = new TX[size_x];
+            y = new TX[size_y];
+            yref = new TX[size_y];
+
+            if (queue != nullptr) {
+                delete queue;
+            }
+            queue = new blas::Queue(device_id);
+
+            dx = blas::device_malloc<TX>(size_x, *queue);
+            dy = blas::device_malloc<TX>(size_y, *queue);
+            dp = blas::device_malloc<TX>(5, *queue);
+        }
+    }
+
+    // Free all memory
+    void free() {
+        if (x != nullptr) {
+            delete[] x;
+            delete[] xref;
+            delete[] y;
+            delete[] yref;
+            x = nullptr;
+            xref = nullptr;
+            y = nullptr;
+            yref = nullptr;
+        }
+
+        if (dx != nullptr && queue != nullptr) {
+            blas::device_free(dx, *queue);
+            blas::device_free(dy, *queue);
+            blas::device_free(dp, *queue);
+            dx = nullptr;
+            dy = nullptr;
+            dp = nullptr;
+        }
+
+        if (queue != nullptr) {
+            delete queue;
+            queue = nullptr;
+        }
+
+        size_x = 0;
+        size_y = 0;
+        device_id = -1;
+    }
+
+    ~RotmDeviceMemoryPool() {
+        // Only free host memory; device memory cleanup is skipped
+        // to avoid errors when CUDA context is already destroyed at program exit
+        if (x != nullptr) {
+            delete[] x;
+            delete[] xref;
+            delete[] y;
+            delete[] yref;
+            x = nullptr;
+            xref = nullptr;
+            y = nullptr;
+            yref = nullptr;
+        }
+        // DO NOT call blas::device_free()
+        // DO NOT delete queue
+    }
+};
+
+// Static memory pools for each data type
+static RotmDeviceMemoryPool<float> pool_s;
+static RotmDeviceMemoryPool<double> pool_d;
+
+// -----------------------------------------------------------------------------
 template <typename TX>
 void test_rotm_device_work( Params& params, bool run )
 {
@@ -46,23 +164,31 @@ void test_rotm_device_work( Params& params, bool run )
         return;
     }
 
+    // Get appropriate memory pool
+    RotmDeviceMemoryPool<TX>* pool = nullptr;
+    if (std::is_same<TX, float>::value) {
+        pool = reinterpret_cast<RotmDeviceMemoryPool<TX>*>(&pool_s);
+    } else if (std::is_same<TX, double>::value) {
+        pool = reinterpret_cast<RotmDeviceMemoryPool<TX>*>(&pool_d);
+    }
+
     // setup
     size_t size_x = max( (n - 1) * abs( incx ) + 1, 0 );
     size_t size_y = max( (n - 1) * abs( incy ) + 1, 0 );
-    TX* x    = new TX[ size_x ];
-    TX* xref = new TX[ size_x ];
-    TX* y    = new TX[ size_y ];
-    TX* yref = new TX[ size_y ];
+
+    // Allocate or reuse memory from pool
+    pool->allocate(size_x, size_y, device);
+
+    TX* x = pool->x;
+    TX* xref = pool->xref;
+    TX* y = pool->y;
+    TX* yref = pool->yref;
 
     // device specifics
-    blas::Queue queue( device );
-    TX* dx;
-    TX* dy;
-    TX* dp;
-
-    dx = blas::device_malloc<TX>( size_x, queue );
-    dy = blas::device_malloc<TX>( size_y, queue );
-    dp = blas::device_malloc<TX>( 5, queue );
+    blas::Queue& queue = *(pool->queue);
+    TX* dx = pool->dx;
+    TX* dy = pool->dy;
+    TX* dp = pool->dp;
 
     int64_t idist = 1;
     int iseed[4] = { 0, 0, 0, 1 };
@@ -169,10 +295,8 @@ void test_rotm_device_work( Params& params, bool run )
         delete[] Cref;
     }
 
-    delete[] x;
-    delete[] y;
-    delete[] xref;
-    delete[] yref;
+    // Memory is managed by the pool and will be reused or freed automatically
+    // No explicit deletion needed here
 }
 
 // -----------------------------------------------------------------------------
