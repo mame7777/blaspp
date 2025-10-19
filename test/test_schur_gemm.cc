@@ -238,7 +238,7 @@ void test_schur_gemm_work( Params& params, bool run )
 
     double gflop = blas::Gflop< scalar_t >::gemm( m_, n_, k_ );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     if (format == Format::LAPACK) {
         blas::device_copy_matrix( Cm, Cn, dC, ldc_, C, ldc_, queue );
@@ -267,7 +267,7 @@ void test_schur_gemm_work( Params& params, bool run )
     time = get_wtime() - time;
 
     params.time2()   = time;
-    params.gflops2() = gflop / time;
+    params.gflops2() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     // todo: copy & check multi-stream result.
 

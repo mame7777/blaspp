@@ -245,7 +245,7 @@ void test_trmm_device_work( Params& params, bool run )
 
     double gflop = blas::Gflop< scalar_t >::trmm( side, m, n );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
     blas::device_copy_matrix(Bm, Bn, dB, ldb, B, ldb, queue);
     queue.sync();
 
@@ -266,7 +266,7 @@ void test_trmm_device_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         if (verbose >= 2) {
             printf( "Xref = " ); print_matrix( Bm, Bn, Bref, ldb );

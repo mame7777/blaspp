@@ -112,7 +112,7 @@ void test_batch_syr2k_work( Params& params, bool run )
 
     double gflop = batch * blas::Gflop< scalar_t >::syr2k( n_, k_ );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     if (params.ref() == 'y' || params.check() == 'y') {
         // run reference
@@ -127,7 +127,7 @@ void test_batch_syr2k_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         // check error compared to reference
         real_t err, error = 0;

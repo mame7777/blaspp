@@ -274,7 +274,7 @@ void test_symm_device_work( Params& params, bool run )
 
     double gflop = blas::Gflop< scalar_t >::symm( side, m, n );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
     blas::device_copy_matrix(Cm, Cn, dC, ldc, C, ldc, queue);
     queue.sync();
 
@@ -293,7 +293,7 @@ void test_symm_device_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         if (verbose >= 2) {
             printf( "Cref = " ); print_matrix( Cm, Cn, Cref, ldc );

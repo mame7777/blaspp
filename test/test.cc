@@ -329,9 +329,9 @@ Params::Params():
     gflops4   ( "gflop/s",   12, 3, PT_Out, no_data, 0, 0, "Gflop/s rate" ),
     gbytes4   ( "gbyte/s",   12, 3, PT_Out, no_data, 0, 0, "Gbyte/s rate" ),
 
-    ref_time  ( "ref time (s)",  9, 3, PT_Out, no_data, 0, 0, "reference time to solution" ),
-    ref_gflops( "ref gflop/s",  12, 3, PT_Out, no_data, 0, 0, "reference Gflop/s rate" ),
-    ref_gbytes( "ref gbyte/s",  12, 3, PT_Out, no_data, 0, 0, "reference Gbyte/s rate" ),
+    ref_time  ( "ref time (s)",  0, 3, PT_Value, no_data, 0, 0, "reference time to solution" ),
+    ref_gflops( "ref gflop/s",  0, 3, PT_Value, no_data, 0, 0, "reference Gflop/s rate" ),
+    ref_gbytes( "ref gbyte/s",  0, 3, PT_Value, no_data, 0, 0, "reference Gbyte/s rate" ),
 
     // default -1 means "no check"
     //          name,         w, type, default, min, max, help

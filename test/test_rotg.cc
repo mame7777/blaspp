@@ -34,7 +34,6 @@ void test_rotg_work( Params& params, bool run )
     // adjust header to msec
     params.time.name( "time (ms)" );
     params.ref_time.name( "ref time (ms)" );
-    params.ref_time.width( 13 );
 
     if (! run)
         return;

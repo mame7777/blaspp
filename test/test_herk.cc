@@ -108,7 +108,7 @@ void test_herk_work( Params& params, bool run )
 
     double gflop = blas::Gflop< scalar_t >::herk( n, k );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     if (verbose >= 2) {
         printf( "C2 = " ); print_matrix( n, n, C, ldc );
@@ -125,7 +125,7 @@ void test_herk_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         if (verbose >= 2) {
             printf( "Cref = " ); print_matrix( n, n, Cref, ldc );

@@ -131,7 +131,7 @@ void test_gemm_work( Params& params, bool run )
 
     double gflop = blas::Gflop< scalar_t >::gemm( m, n, k );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     if (verbose >= 2) {
         printf( "C2 = " ); print_matrix( Cm, Cn, C, ldc );
@@ -148,7 +148,7 @@ void test_gemm_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         if (verbose >= 2) {
             printf( "Cref = " ); print_matrix( Cm, Cn, Cref, ldc );

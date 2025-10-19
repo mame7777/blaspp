@@ -301,7 +301,7 @@ void test_batch_hemm_device_work( Params& params, bool run )
 
     double gflop = batch * blas::Gflop< scalar_t >::hemm( side_, m_, n_ );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
     blas::device_copy_matrix(Cm, batch * Cn, dC, ldc_, C, ldc_, queue);
     queue.sync();
@@ -318,7 +318,7 @@ void test_batch_hemm_device_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         // check error compared to reference
         real_t err, error = 0;

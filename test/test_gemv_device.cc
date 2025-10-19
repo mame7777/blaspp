@@ -166,7 +166,6 @@ void test_gemv_device_work( Params& params, bool run )
     // adjust header to msec
     params.time.name( "time (ms)" );
     params.ref_time.name( "ref time (ms)" );
-    params.ref_time.width( 13 );
 
     if (! run)
         return;
@@ -270,8 +269,8 @@ void test_gemv_device_work( Params& params, bool run )
     double gflop = blas::Gflop< scalar_t >::gemv( m, n );
     double gbyte = blas::Gbyte< scalar_t >::gemv( m, n );
     params.time()   = time * 1000;  // msec
-    params.gflops() = gflop / time;
-    params.gbytes() = gbyte / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
+    params.gbytes() = (gbyte > 0 ? gbyte / time : testsweeper::no_data_flag);
 
     blas::device_copy_vector( Ym, dy, abs( incy ), y, abs( incy ), queue );
     queue.sync();
@@ -289,8 +288,8 @@ void test_gemv_device_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time; // * 1000;  // msec
-        params.ref_gflops() = gflop / time;
-        params.ref_gbytes() = gbyte / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
+        params.ref_gbytes() = (gbyte > 0 ? gbyte / time : testsweeper::no_data_flag);
 
         if (verbose >= 2) {
             printf( "yref = " ); print_vector( Ym, yref, incy );

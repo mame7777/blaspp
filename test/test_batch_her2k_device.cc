@@ -295,7 +295,7 @@ void test_batch_her2k_device_work( Params& params, bool run )
 
     double gflop = batch * blas::Gflop< scalar_t >::her2k( n_, k_ );
     params.time()   = time;
-    params.gflops() = gflop / time;
+    params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
     blas::device_copy_matrix(n_, batch * n_, dC, ldc_, C, ldc_, queue);
     queue.sync();
 
@@ -312,7 +312,7 @@ void test_batch_her2k_device_work( Params& params, bool run )
         time = get_wtime() - time;
 
         params.ref_time()   = time;
-        params.ref_gflops() = gflop / time;
+        params.ref_gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
 
         // check error compared to reference
         real_t err, error = 0;
