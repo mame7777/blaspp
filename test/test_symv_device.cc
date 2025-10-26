@@ -214,8 +214,8 @@ void test_symv_device_work( Params& params, bool run )
     cblas_copy( n, y, incy, yref, incy );
 
     blas::device_copy_matrix( n, n, A, lda, dA, lda, queue );
-    blas::device_copy_vector( size_x, x, abs( incx ), dx, abs( incx ), queue );
-    blas::device_copy_vector( size_y, y, abs( incy ), dy, abs( incy ), queue );
+    blas::device_copy_vector( n, x, abs( incx ), dx, abs( incx ), queue );
+    blas::device_copy_vector( n, y, abs( incy ), dy, abs( incy ), queue );
     queue.sync();
 
     // norms for error check
@@ -262,7 +262,7 @@ void test_symv_device_work( Params& params, bool run )
     params.time()   = time * 1000;  // msec
     params.gflops() = (gflop > 0 ? gflop / time : testsweeper::no_data_flag);
     params.gbytes() = (gbyte > 0 ? gbyte / time : testsweeper::no_data_flag);
-    blas::device_copy_vector( size_y, dy, abs( incy ), y, abs( incy ), queue );
+    blas::device_copy_vector( n, dy, abs( incy ), y, abs( incy ), queue );
     queue.sync();
 
     if (verbose >= 2) {
