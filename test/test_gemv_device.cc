@@ -262,7 +262,10 @@ void test_gemv_device_work( Params& params, bool run )
     // run test
     testsweeper::flush_cache( params.cache() );
     double time = get_wtime();
-    blas::gemv( layout, trans, m, n, alpha, dA, lda, dx, incx, beta, dy, incy, queue );
+    // For negative increment, adjust device pointer to the correct starting position
+    TX* dx_ptr = (incx > 0) ? dx : dx + (Xm - 1) * abs(incx);
+    TY* dy_ptr = (incy > 0) ? dy : dy + (Ym - 1) * abs(incy);
+    blas::gemv( layout, trans, m, n, alpha, dA, lda, dx_ptr, incx, beta, dy_ptr, incy, queue );
     queue.sync();
     time = get_wtime() - time;
 
