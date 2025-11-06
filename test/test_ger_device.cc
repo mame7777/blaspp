@@ -276,6 +276,7 @@ void test_ger_device_work( Params& params, bool run )
     else {
         blas::geru( layout, m, n, alpha, dx, incx, dy, incy, dA, lda, queue );
     }
+    queue.sync();
     time = get_wtime() - time;
 
     double gflop = blas::Gflop< scalar_t >::ger( m, n );
